@@ -38,6 +38,11 @@ const app = createApp(App)
   .use(IonicVue)
   .use(router);
 
+import { defineCustomElements } from '@ionic/pwa-elements/loader';
+
 router.isReady().then(() => {
   app.mount('#app');
 });
+
+// Inicializamos PWA elements para la cámara web
+defineCustomElements(window);
