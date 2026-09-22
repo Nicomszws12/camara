@@ -1,87 +1,115 @@
 import { ref, onMounted, watch } from 'vue';
-import { Camera, CameraResultType, CameraSource, Photo } from '@capacitor/camera';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Preferences } from '@capacitor/preferences';
 
 export interface UserPhoto {
   filepath: string;
-  webviewPath?: string;
+  webviewPath: string;
+  timestamp: number;
 }
 
 export function usePhotoGallery() {
   const photos = ref<UserPhoto[]>([]);
-  const PHOTO_STORAGE = 'photos';
+  const PHOTO_STORAGE = 'photos_gallery_v2';
 
   const loadSaved = async () => {
-    const photoList = await Preferences.get({ key: PHOTO_STORAGE });
-    const photosInPreferences = photoList.value ? JSON.parse(photoList.value) : [];
+    try {
+      const photoList = await Preferences.get({ key: PHOTO_STORAGE });
+      const storedItems: { filepath: string; timestamp: number }[] = photoList.value ? JSON.parse(photoList.value) : [];
 
-    for (const photo of photosInPreferences) {
-      const file = await Filesystem.readFile({
-        path: photo.filepath,
-        directory: Directory.Data,
-      });
-      photo.webviewPath = `data:image/jpeg;base64,${file.data}`;
+      const loadedPhotos: UserPhoto[] = [];
+      for (const item of storedItems) {
+        try {
+          const file = await Filesystem.readFile({
+            path: item.filepath,
+            directory: Directory.Data,
+          });
+          loadedPhotos.push({
+            filepath: item.filepath,
+            webviewPath: `data:image/jpeg;base64,${file.data}`,
+            timestamp: item.timestamp || Date.now()
+          });
+        } catch (e) {
+          console.warn('Could not read photo file:', item.filepath, e);
+        }
+      }
+      photos.value = loadedPhotos;
+    } catch (err) {
+      console.error('Error in loadSaved:', err);
     }
-    photos.value = photosInPreferences;
   };
 
-  const takePhoto = async () => {
-    const photo = await Camera.getPhoto({
-      resultType: CameraResultType.Uri,
-      source: CameraSource.Prompt,
-      quality: 100,
-    });
+  // Guardar imagen Base64 (proveniente de la captura directa en vivo de la cámara o de archivos)
+  const saveBase64Image = async (base64Data: string): Promise<UserPhoto> => {
+    const rawBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const fileName = `IMG_${Date.now()}.jpeg`;
+    const timestamp = Date.now();
 
-    const fileName = new Date().getTime() + '.jpeg';
-    const savedFileImage = await savePicture(photo, fileName);
-
-    photos.value = [savedFileImage, ...photos.value];
-  };
-
-  const savePicture = async (photo: Photo, fileName: string): Promise<UserPhoto> => {
-    let base64Data: string | Blob;
-
-    if (photo.webPath) {
-      const response = await fetch(photo.webPath);
-      const blob = await response.blob();
-      base64Data = await convertBlobToBase64(blob) as string;
-    } else {
-      const file = await Filesystem.readFile({
-        path: photo.path!,
-      });
-      base64Data = file.data;
-    }
-
-    const savedFile = await Filesystem.writeFile({
+    await Filesystem.writeFile({
       path: fileName,
-      data: base64Data,
+      data: rawBase64,
       directory: Directory.Data,
     });
 
-    return {
+    const newPhoto: UserPhoto = {
       filepath: fileName,
-      webviewPath: photo.webPath,
+      webviewPath: base64Data.startsWith('data:') ? base64Data : `data:image/jpeg;base64,${base64Data}`,
+      timestamp
     };
+
+    photos.value = [newPhoto, ...photos.value];
+    return newPhoto;
+  };
+
+  // Seleccionar foto desde la galería o explorador de archivos nativo
+  const pickFromGallery = async (): Promise<UserPhoto | null> => {
+    try {
+      const photo = await Camera.getPhoto({
+        resultType: CameraResultType.Uri,
+        source: CameraSource.Photos,
+        quality: 100,
+      });
+
+      if (photo.webPath) {
+        const response = await fetch(photo.webPath);
+        const blob = await response.blob();
+        const base64 = await convertBlobToBase64(blob) as string;
+        return await saveBase64Image(base64);
+      }
+    } catch (err) {
+      console.log('Selección de galería cancelada o error', err);
+    }
+    return null;
+  };
+
+  // Eliminar foto del sistema de archivos y del estado
+  const deletePhoto = async (photo: UserPhoto) => {
+    photos.value = photos.value.filter(p => p.filepath !== photo.filepath);
+    try {
+      await Filesystem.deleteFile({
+        path: photo.filepath,
+        directory: Directory.Data,
+      });
+    } catch (e) {
+      console.warn('Archivo no encontrado para eliminar:', e);
+    }
   };
 
   const convertBlobToBase64 = (blob: Blob) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = reject;
-    reader.onload = () => {
-        resolve(reader.result);
-    };
+    reader.onload = () => resolve(reader.result);
     reader.readAsDataURL(blob);
   });
-  
+
   const cachePhotos = () => {
     Preferences.set({
       key: PHOTO_STORAGE,
-      value: JSON.stringify(photos.value.map(p => {
-        const photoCopy = { ...p };
-        delete photoCopy.webviewPath;
-        return photoCopy;
-      })),
+      value: JSON.stringify(photos.value.map(p => ({
+        filepath: p.filepath,
+        timestamp: p.timestamp
+      }))),
     });
   };
 
@@ -90,6 +118,9 @@ export function usePhotoGallery() {
 
   return {
     photos,
-    takePhoto,
+    saveBase64Image,
+    pickFromGallery,
+    deletePhoto,
+    loadSaved
   };
 }
